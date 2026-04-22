@@ -1,0 +1,25 @@
+# config/default.toml
+# This is the baseline configuration for the application.
+
+[server]
+# The port the Axum server will bind to.
+port = 3000
+
+# The host address (use 0.0.0.0 for Docker/Production).
+host = "127.0.0.1"
+
+# A list of allowed origins for CORS. 
+# Use ["*"] for development or specific URLs for production.
+allowed_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://your-production-app.com"
+]
+
+[database]
+# Path to the DuckDB file. Use ":memory:" for an in-memory database.
+filename = "data.db"
+
+# Optional: Path to a SQL file to run on database initialization.
+# If the file does not exist, the app will skip this step.
+init_sql_path = "config/init.sql"
