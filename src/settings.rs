@@ -11,6 +11,7 @@ pub struct ServerSettings {
     pub port: u16,
     pub host: String,
     pub allowed_origins: Vec<String>,
+    pub api_token: String
 }
 
 impl Default for ServerSettings {
@@ -23,6 +24,7 @@ impl Default for ServerSettings {
                 "https://api.example.com".parse().unwrap(),
             ]
             .to_vec(),
+            api_token: "mysecret".to_string(),
         }
     }
 }
@@ -55,6 +57,7 @@ pub fn get_configuration() -> Result<Settings, config::ConfigError> {
         .set_default("server.port", default_server.port)?
         .set_default("server.host", default_server.host)?
         .set_default("server.allowed_origins", default_server.allowed_origins)?
+        .set_default("server.api_token", default_server.api_token)?
         .set_default("database.filename", default_db.filename)?
         // 2. Load the optional file (overwrites defaults)
         .add_source(config::File::with_name("config/default").required(false))

@@ -16,6 +16,8 @@ allowed_origins = [
     "https://your-production-app.com"
 ]
 
+api_token = "your-very-secure-static-token"
+
 [database]
 # Path to the DuckDB file. Use ":memory:" for an in-memory database.
 filename = "data.db"

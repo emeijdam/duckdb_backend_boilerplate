@@ -73,6 +73,18 @@ curl -X POST http://localhost:3000/write \
      -d '{"message": "System check successful"}'
 ```
 
+```bash
+curl -H "Authorization: Bearer your-very-secure-static-token" \
+     "http://localhost:3000/logs?limit=50"
+```
+
+```bash
+curl -X POST http://localhost:3000/write \
+     -H "Authorization: Bearer your-very-secure-static-token" \
+     -H "Content-Type: application/json" \
+     -d '{"message": "System check successful"}'
+```
+
 ## Development
 
 - **Database Initialization**: On startup, the app runs `config/init.sql` (if it exists) and ensures the `logs` table is created.

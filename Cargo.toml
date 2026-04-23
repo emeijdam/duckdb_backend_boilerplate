@@ -7,6 +7,7 @@ edition = "2024"
 arrow = "58.1.0"
 arrow-json = "58.1.0"
 axum = "0.8.9"
+axum-extra = { version = "0.12.6", features = ["typed-header"] }
 config = "0.15.22"
 dotenvy = "0.15.7"
 duckdb = { version = "1.10502.0", features = ["bundled", "r2d2"] }

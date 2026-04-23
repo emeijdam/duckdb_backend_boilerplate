@@ -6,6 +6,7 @@ use axum::{
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
+use axum_extra::{TypedHeader, headers::{Authorization, authorization::Bearer}};
 use duckdb::params;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -29,8 +30,29 @@ pub struct StatusResponse {
 
 pub async fn trigger_write(
     State(state): State<Arc<AppState>>,
+    auth: Option<TypedHeader<Authorization<Bearer>>>,
     Json(payload): Json<WriteRequest>
 ) -> (StatusCode, Json<StatusResponse>) {
+
+     // 1. Validate the Token
+    let is_authorized = auth
+        .map(|TypedHeader(Authorization(bearer))| {
+            bearer.token() == state.settings.server.api_token
+        })
+        .unwrap_or(false);
+
+    if !is_authorized {
+        return 
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(StatusResponse {
+                status: "UNAUTHORIZED".to_string(),
+                message: "Provide valid bearer".to_string(),
+            })
+        )
+    };
+    
+
     let pool = state.pool.clone();
     let msg = payload.message.clone();
 
@@ -102,8 +124,24 @@ pub struct LogParams {
 
 pub async fn get_logs_streaming(
     State(state): State<Arc<AppState>>,
+    auth: Option<TypedHeader<Authorization<Bearer>>>,
     Query(params): Query<LogParams>, // Extract ?level=error&limit=100
 ) -> Response {
+
+    // 1. Validate the Token
+    let is_authorized = auth
+        .map(|TypedHeader(Authorization(bearer))| {
+            bearer.token() == state.settings.server.api_token
+        })
+        .unwrap_or(false);
+
+    if !is_authorized {
+        return (StatusCode::UNAUTHORIZED, Json(StatusResponse {
+            status: "UNAUTHORIZED".to_string(),
+            message: "Provide valid bearer".to_string(),
+        })).into_response();
+    }
+
     let pool = state.pool.clone();
     let (tx, rx) = mpsc::channel(10);
 
