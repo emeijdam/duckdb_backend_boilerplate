@@ -20,6 +20,11 @@ allowed_origins = [
 # Path to the DuckDB file. Use ":memory:" for an in-memory database.
 filename = "data.db"
 
+
 # Optional: Path to a SQL file to run on database initialization.
 # If the file does not exist, the app will skip this step.
 init_sql_path = "config/init.sql"
+
+# Optional: Path to a SQL file to run on database updates.
+# If the file does not exist, the app will skip this step.
+update_sql_path = "config/init.sql"

@@ -31,6 +31,7 @@ impl Default for ServerSettings {
 pub struct DatabaseSettings {
     pub filename: String,
     pub init_sql_path: Option<String>,
+    pub update_sql_path: Option<String>,
 }
 
 impl Default for DatabaseSettings {
@@ -38,6 +39,8 @@ impl Default for DatabaseSettings {
         Self {
             filename: ":memory:".to_string(),
             init_sql_path: None,
+            update_sql_path: None
+            
         }
     }
 }

@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::state::AppState;
+use std::fs;
 
 #[derive(Deserialize)]
 pub struct WriteRequest {
@@ -28,16 +29,36 @@ pub struct StatusResponse {
 
 pub async fn trigger_write(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<WriteRequest>,
+    Json(payload): Json<WriteRequest>
 ) -> (StatusCode, Json<StatusResponse>) {
     let pool = state.pool.clone();
     let msg = payload.message.clone();
 
+    let settings = state.settings.clone();
+
     // Offload the synchronous DuckDB write to a blocking thread
     let result = tokio::task::spawn_blocking(move || {
         let conn = pool.get().map_err(|e| e.to_string())?;
+
+        if let Some(update_path) = &settings.database.update_sql_path {
+            match fs::read_to_string(update_path) {
+            Ok(sql) => {
+               // let conn = pool.get().expect("Failed to get connection");
+                conn.execute_batch(&sql)
+                    .expect("Failed to execute init SQL script");
+                tracing::debug!("Database initialized with: {}", update_path);
+            }
+            Err(_) => {
+                tracing::debug!("Notice: Init script at '{}' not found. Skipping.", update_path);
+            }
+        }
+        };
+
         conn.execute("INSERT INTO logs (msg) VALUES (?)", params![msg])
             .map_err(|e| e.to_string())
+
+      
+
     })
     .await;
 

@@ -20,6 +20,7 @@ use std::{sync::Arc, time::Instant};
 
 #[tokio::main]
 async fn main() {
+    
     // Load config
     let settings = get_configuration().expect("Failed to load config");
 
@@ -35,6 +36,7 @@ async fn main() {
     let state = Arc::new(AppState {
         pool,
         start_time: Instant::now(),
+        settings: settings.clone()
     });
 
     let allowed_origins: Vec<HeaderValue> = settings.server.allowed_origins
