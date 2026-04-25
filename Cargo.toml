@@ -3,6 +3,10 @@ name = "duckdb_backend"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "crosv_api_server"
+path = "src/main.rs"
+
 [dependencies]
 arrow = "58.1.0"
 arrow-json = "58.1.0"

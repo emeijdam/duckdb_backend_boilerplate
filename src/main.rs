@@ -3,11 +3,12 @@ use axum::{
 };
 
 use duckdb_backend::{
-    dbinit::db_init,
-    health::health_check,
-    routes::{get_logs, get_logs_streaming, trigger_write},
-    settings::get_configuration,
-    state::AppState,
+    dbinit::db_init, health::health_check, 
+    packages::get_packages,
+    release::get_current_release, 
+    refreshlog::get_refresh_log,
+    routes::{get_logs, get_logs_streaming, trigger_write}, settings::get_configuration, 
+    state::AppState
 };
 
 use tower::ServiceBuilder;
@@ -61,7 +62,10 @@ async fn main() {
         .route("/health", get(health_check))
         .route("/logs", get(get_logs))
         .route("/logstream", get(get_logs_streaming))
-        .route("/write", post(trigger_write)) // The new POST route
+        .route("/release", get(get_current_release))
+        .route("/packages", get(get_packages))
+        .route("/refresh", post(trigger_write)) // The new POST route
+        .route("/refreshlog", get(get_refresh_log))
         .layer(ServiceBuilder::new().layer(cors_layer))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -75,7 +79,10 @@ async fn main() {
     tracing::debug!("  GET /health                 - Health check");
     tracing::debug!("  GET /logs                   - get logs");
     tracing::debug!("  GET /logstream              - get arrow stream ndjson");
-    tracing::debug!("  POST /write                 - Trigger write to database");
+    tracing::debug!("  GET /release                - get arrow stream r project release");
+    tracing::debug!("  GET /packages               - get arrow stream r packages");
+    tracing::debug!("  GET /refreshlog             - get arrow stream data refresh log");
+    tracing::debug!("  POST /refresh               - Trigger write to database");
     tracing::debug!("listening on http://{}", listener.local_addr().unwrap());
 
     axum::serve(listener, app).await.unwrap();

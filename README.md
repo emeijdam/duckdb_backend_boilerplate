@@ -31,7 +31,7 @@ The app loads configuration from `config/default.toml` by default. You can overr
 
 **Example: Overriding port and database path via Env**
 ```bash
-APP_SERVER__PORT=4000 APP_DATABASE__FILENAME=prod_logs.db cargo run
+APP_SERVER__PORT=3000 APP_SERVER__HOST=127.0.0.1 APP_SERVER__API_TOKEN=your-very-secure-static-token APP_DATABASE__FILENAME=./KANWEG.db APP_DATABASE__INIT_SQL_PATH=config/init.sql APP_DATABASE__REFRESH_SQL_PATH=config/refresh.sql cargo run
 ```
 
 ### Installation
@@ -64,7 +64,29 @@ Streams database results as Line-Delimited JSON (NDJSON).
   - `level` (optional): Filter by log level.
   - `limit` (optional): Limit results (default: 1000).
 
-### 4. Write Log
+### 4. Get Packages (NDJSON/Arrow)
+`GET /packages`  
+Streams R package data from `stage_cran_current` as NDJSON.
+- **Query Params**:
+  - `package` (optional): Case-insensitive search for package name.
+  - `maintainer` (optional): Case-insensitive search for maintainer.
+  - `license` (optional): Case-insensitive search for license.
+  - `limit` (optional): Number of results to return (default: 1000).
+  - `offset` (optional): Number of results to skip (default: 0).
+  - `sort_by` (optional): Field to sort by (`package`, `version`, `license`, `maintainer`, `published`, `title`).
+  - `sort_order` (optional): `asc` or `desc` (default: `asc`).
+
+**Example: Filter by package and sort**
+```bash
+curl "http://localhost:3000/packages?package=ggplot&sort_by=published&sort_order=desc"
+```
+
+**Example: Filter by maintainer with pagination**
+```bash
+curl "http://localhost:3000/packages?maintainer=Hadley&limit=10&offset=0"
+```
+
+### 5. Write Log
 `POST /write`  
 Inserts a new message into the database.
 ```bash
@@ -79,13 +101,16 @@ curl -H "Authorization: Bearer your-very-secure-static-token" \
 ```
 
 ```bash
-curl -X POST http://localhost:3000/write \
+curl -X POST http://localhost:3000/refresh \
      -H "Authorization: Bearer your-very-secure-static-token" \
      -H "Content-Type: application/json" \
      -d '{"message": "System check successful"}'
 ```
 
 ## Development
-
 - **Database Initialization**: On startup, the app runs `config/init.sql` (if it exists) and ensures the `logs` table is created.
 - **CORS**: Configurable via `config/default.toml` under `server.allowed_origins`.
+
+```bash
+APP_SERVER__PORT=3000 APP_SERVER__HOST=127.0.0.1 APP_SERVER__API_TOKEN=your-very-secure-static-token APP_DATABASE__FILENAME=./KANWEG.db APP_DATABASE__INIT_SQL_PATH=config/init.sql APP_DATABASE__REFRESH_SQL_PATH=config/refresh.sql cargo watch run
+```
