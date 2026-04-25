@@ -13,8 +13,8 @@ use crate::state::AppState;
 #[derive(Deserialize)]
 pub struct PackageParams {
     package: Option<String>,
-    maintainer: Option<String>,
-    license: Option<String>,
+    _maintainer: Option<String>,
+    _license: Option<String>,
     osv_safety_status: Option<String>,
     limit: Option<usize>,
     offset: Option<usize>,
