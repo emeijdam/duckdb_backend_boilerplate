@@ -1,4 +1,5 @@
 use arrow_json::LineDelimitedWriter;
+use arrow_json::writer::JsonArray;
 use axum::{
     Json,
     body::Bytes,
@@ -14,7 +15,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::state::AppState;
+use crate::state::{AppState, PagedResponse, PagingInfo};
 use std::fs;
 
 #[derive(Deserialize)]
@@ -118,8 +119,10 @@ pub async fn get_logs(State(state): State<Arc<AppState>>) -> String {
 // Gebruik State<Arc<AppState>> in plaats van Extension voor Axum 0.7
 #[derive(Deserialize)]
 pub struct LogParams {
-    level: Option<String>,
-    limit: Option<usize>,
+    pub level: Option<String>,
+    pub format: Option<String>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
 }
 
 pub async fn get_logs_streaming(
@@ -142,58 +145,116 @@ pub async fn get_logs_streaming(
         })).into_response();
     }
 
+    let limit = params.limit.unwrap_or(100);
+    let offset = params.offset.unwrap_or(0);
+    let format = params.format.clone().unwrap_or_else(|| "json".to_string());
+
     let pool = state.pool.clone();
-    let (tx, rx) = mpsc::channel(10);
 
-    tokio::task::spawn_blocking(move || {
-        let conn = match pool.get() {
-            Ok(c) => c,
-            Err(_) => return,
-        };
+    if format == "ndjson" {
+        let (tx, rx) = mpsc::channel(10);
 
-        // Build a dynamic query safely
-        let mut query = "SELECT * FROM logs WHERE 1=1".to_string();
-        if params.level.is_some() {
-            query.push_str(" AND level = ?");
-        }
-        query.push_str(" LIMIT ?");
+        tokio::task::spawn_blocking(move || {
+            let conn = match pool.get() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
 
-        let mut stmt = match conn.prepare(&query) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-
-        // Bind parameters dynamically
-        let limit = params.limit.unwrap_or(1000) as i64;
-
-        let arrow_reader_result = if let Some(ref level) = params.level {
-            stmt.query_arrow(params![level, limit])
-        } else {
-            stmt.query_arrow(params![limit])
-        };
-
-        let arrow_reader = match arrow_reader_result {
-            Ok(r) => r,
-            Err(_) => return,
-        };
-
-        // arrow_reader is the Iterator that yields RecordBatch
-        for batch in arrow_reader {
-            if tx.blocking_send(batch).is_err() {
-                break; // Client hung up
+            // Build a dynamic query safely
+            let mut query = "SELECT * FROM logs WHERE 1=1".to_string();
+            if params.level.is_some() {
+                query.push_str(" AND level = ?");
             }
+
+            let mut stmt = match conn.prepare(&query) {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+
+            let arrow_reader_result = if let Some(ref level) = params.level {
+                stmt.query_arrow(params![level])
+            } else {
+                stmt.query_arrow([])
+            };
+
+            let arrow_reader = match arrow_reader_result {
+                Ok(r) => r,
+                Err(_) => return,
+            };
+
+            // arrow_reader is the Iterator that yields RecordBatch
+            for batch in arrow_reader {
+                if tx.blocking_send(batch).is_err() {
+                    break; // Client hung up
+                }
+            }
+        });
+
+        let stream = ReceiverStream::new(rx).map(|batch| {
+            let mut buffer = Vec::new();
+            let mut writer = LineDelimitedWriter::new(&mut buffer);
+            writer.write(&batch).ok();
+            Ok::<_, std::io::Error>(Bytes::from(buffer))
+        });
+
+        return Response::builder()
+            .header(header::CONTENT_TYPE, "application/x-ndjson")
+            .body(axum::body::Body::from_stream(stream))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    }
+
+    // Default JSON branch
+    let result = tokio::task::spawn_blocking(move || {
+        let conn = pool.get().map_err(|e| e.to_string())?;
+
+        // 1. Build common filter part
+        let mut filter_clause = " FROM logs WHERE 1=1".to_string();
+        if params.level.is_some() {
+            filter_clause.push_str(" AND level = ?");
         }
-    });
 
-    let stream = ReceiverStream::new(rx).map(|batch| {
+        // 2. Query total count
+        let count_query = format!("SELECT COUNT(*){}", filter_clause);
+        let total: usize = if let Some(ref level) = params.level {
+            conn.query_row(&count_query, params![level], |row| row.get(0))
+        } else {
+            conn.query_row(&count_query, [], |row| row.get(0))
+        }.map_err(|e| e.to_string())?;
+
+        // 3. Query paged data
+        let query = format!("SELECT *{} LIMIT ? OFFSET ?", filter_clause);
+        let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+        
+        let arrow_reader = if let Some(ref level) = params.level {
+            stmt.query_arrow(params![level, limit as i64, offset as i64])
+        } else {
+            stmt.query_arrow(params![limit as i64, offset as i64])
+        }.map_err(|e| e.to_string())?;
+
         let mut buffer = Vec::new();
-        let mut writer = LineDelimitedWriter::new(&mut buffer);
-        writer.write(&batch).ok();
-        Ok::<_, std::io::Error>(Bytes::from(buffer))
-    });
+        let mut writer = arrow_json::WriterBuilder::new().build::<_, JsonArray>(&mut buffer);
+        for batch in arrow_reader {
+            writer.write(&batch).map_err(|e| e.to_string())?;
+        }
+        writer.finish().map_err(|e| e.to_string())?;
 
-    Response::builder()
-        .header(header::CONTENT_TYPE, "application/x-ndjson")
-        .body(axum::body::Body::from_stream(stream))
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        let data: serde_json::Value = serde_json::from_slice(&buffer).map_err(|e| e.to_string())?;
+        
+        Ok::<(serde_json::Value, usize), String>((data, total))
+    }).await;
+
+    match result {
+        Ok(Ok((data, total))) => {
+            let response = PagedResponse {
+                data,
+                paging: PagingInfo {
+                    limit,
+                    offset,
+                    total,
+                },
+            };
+            Json(response).into_response()
+        }
+        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }

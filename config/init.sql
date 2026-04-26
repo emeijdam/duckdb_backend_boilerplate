@@ -1,4 +1,6 @@
 -- 1. Define your base path here
+SET extension_directory='/var/www/backend.dasc.nl/duckdb_extensions';
+
 CREATE OR REPLACE MACRO base_path(file) AS '~/dev/crosv_project/data/' || file;
 
 CREATE TABLE IF NOT EXISTS r_release_history (
@@ -164,7 +166,8 @@ WITH all_packages AS (
         Title,
         Description,
         Published,
-        Version, 
+        Version,
+        License,
         'current' AS status 
     FROM stage_cran_current
 )
@@ -174,6 +177,7 @@ SELECT
     c.Description,
     c.Published,
     c.Version,
+    c.License,
     c.status,
     v.osv_id,
     CASE 
