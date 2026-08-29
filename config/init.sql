@@ -5,6 +5,14 @@
 -- $CROSV_DATA_DIR (Docker sets /app/data); it falls back to the dev default.
 CREATE OR REPLACE MACRO base_path(file) AS '__CROSV_DATA_DIR__/' || file;
 
+-- Curated package lists (named selections of mirror-eligible packages).
+-- IF NOT EXISTS so it survives every refresh re-run of this script.
+CREATE TABLE IF NOT EXISTS curated_lists (
+    name       VARCHAR PRIMARY KEY,
+    packages   VARCHAR,                     -- JSON array of package names
+    created_at TIMESTAMP DEFAULT current_timestamp
+);
+
 CREATE TABLE IF NOT EXISTS r_release_history (
     r_version VARCHAR PRIMARY KEY,
     nickname VARCHAR,
