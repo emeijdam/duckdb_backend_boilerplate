@@ -1,5 +1,5 @@
 -- 1. Define your base path here
-SET extension_directory='/var/www/backend.dasc.nl/duckdb_extensions';
+-- SET extension_directory='/var/www/backend.dasc.nl/duckdb_extensions';
 
 CREATE OR REPLACE MACRO base_path(file) AS '~/dev/crosv_project/data/' || file;
 
@@ -60,11 +60,20 @@ SELECT * FROM read_csv(
     types={'Date/Publication': 'VARCHAR', 'Published': 'VARCHAR'}
 );
 
-CREATE OR REPLACE TABLE stage_cran_archive AS 
+CREATE OR REPLACE TABLE stage_cran_archive AS
 SELECT * FROM read_csv(
     base_path('archive.csv'),
     auto_detect = true, delim = ';', quote = '"', header = true,
     types={'size': 'VARCHAR'}
+);
+
+-- License classification (cran-osv-tool `license` subcommand → license.csv,
+-- comma-delimited, keyed by Package+Version). Feeds the mirror-eligibility gate.
+CREATE OR REPLACE TABLE stage_license AS
+SELECT * FROM read_csv(
+    base_path('license.csv'),
+    auto_detect = true, delim = ',', quote = '"', header = true,
+    types={'Version': 'VARCHAR'}
 );
 
 -- 3. Flattening OSV
@@ -170,8 +179,9 @@ WITH all_packages AS (
         License,
         'current' AS status 
     FROM stage_cran_current
-)
-SELECT 
+),
+safety AS (
+SELECT
     c.Package,
     c.Title,
     c.Description,
@@ -180,18 +190,39 @@ SELECT
     c.License,
     c.status,
     v.osv_id,
-    CASE 
+    CASE
         -- 1. No matching vulnerability found
         WHEN v.osv_id IS NULL THEN 'SAFE'
-        
+
         -- 2. Vulnerability exists, but current version is >= the fixed version
         WHEN v.fixed_v IS NOT NULL AND r_ver(c.Version) >= r_ver(v.fixed_v) THEN 'FIXED'
-        
+
         -- 3. Current version is >= the version where the vulnerability was introduced
         WHEN v.introduced_v IS NOT NULL AND r_ver(c.Version) >= r_ver(v.introduced_v) THEN 'VULNERABLE'
-        
+
         -- 4. Default fallback
         ELSE 'SAFE'
     END AS osv_safety_status
 FROM all_packages c
-LEFT JOIN vulnerability_lookup v ON c.Package = v.Package;
+LEFT JOIN vulnerability_lookup v ON c.Package = v.Package
+)
+-- Join the license axis and derive the single mirror-eligibility gate.
+SELECT
+    s.*,
+    l.license_spdx,
+    l.license_class,
+    COALESCE(l.license_verdict, 'review')   AS license_verdict,
+    COALESCE(l.requires_source, false)       AS requires_source,
+    COALESCE(l.has_file_license, false)      AS has_file_license,
+    l.cran_is_foss,
+    l.cran_restricts_use,
+    -- MIRROR GATE: CVE-clean AND license-clear. A package version is built &
+    -- served from the wasm mirror only when both axes pass.
+    (
+        s.osv_safety_status IN ('SAFE', 'FIXED')
+        AND l.license_verdict = 'allow'
+        AND COALESCE(l.cran_restricts_use, 'no') <> 'yes'   -- honour CRAN's own flag
+    ) AS mirror_eligible
+FROM safety s
+LEFT JOIN stage_license l
+       ON s.Package = l.Package AND s.Version = l.Version;

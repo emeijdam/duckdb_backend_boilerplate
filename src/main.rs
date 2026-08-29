@@ -4,7 +4,7 @@ use axum::{
 
 use duckdb_backend::{
     dbinit::db_init, health::health_check, 
-    packages::get_packages,
+    packages::{get_packages, get_sbom},
     release::get_current_release, 
     refreshlog::get_refresh_log,
     routes::{get_logs, get_logs_streaming, trigger_write}, settings::get_configuration, 
@@ -64,6 +64,7 @@ async fn main() {
         .route("/logstream", get(get_logs_streaming))
         .route("/release", get(get_current_release))
         .route("/packages", get(get_packages))
+        .route("/sbom", get(get_sbom))
         .route("/refresh", post(trigger_write)) // The new POST route
         .route("/refreshlog", get(get_refresh_log))
         .layer(ServiceBuilder::new().layer(cors_layer))
