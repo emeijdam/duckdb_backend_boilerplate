@@ -65,6 +65,42 @@ fn install_snippets(url: &str, pkgs: &[String]) -> serde_json::Value {
     })
 }
 
+#[derive(Deserialize)]
+pub struct BuildParams {
+    /// WebR R version / contrib dir; must match the deployed WebR (0.6.0 → 4.6).
+    pub rver: Option<String>,
+}
+
+/// POST /lists/{name}/build — materialize the list into a WebR repo (in-process,
+/// Rust). Bearer-gated. Returns the build report (shipped, blocked, sha256s).
+pub async fn build_list_handler(
+    State(state): State<Arc<AppState>>,
+    auth: Option<TypedHeader<Authorization<Bearer>>>,
+    Path(name): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<BuildParams>,
+) -> Response {
+    if !authorized(&state, auth) {
+        return (StatusCode::UNAUTHORIZED, "Provide a valid bearer token").into_response();
+    }
+    if !slug_ok(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid name").into_response();
+    }
+    let rver = q.rver.unwrap_or_else(|| "4.6".into());
+    let out_root =
+        std::env::var("CROSV_MIRROR_OUT").unwrap_or_else(|_| "/app/lists".into());
+    let pool = state.pool.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::builder::build_list(&pool, &name, &rver, &out_root)
+    })
+    .await;
+    match result {
+        Ok(Ok(report)) => (StatusCode::OK, Json(report)).into_response(),
+        Ok(Err(e)) if e == "no such list" => (StatusCode::NOT_FOUND, e).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_GATEWAY, e).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 /// POST /lists — validate the selection is all mirror-eligible, then store it.
 pub async fn create_list(
     State(state): State<Arc<AppState>>,

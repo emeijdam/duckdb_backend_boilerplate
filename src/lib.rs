@@ -5,5 +5,6 @@ pub mod state;
 pub mod health;
 pub mod packages;
 pub mod lists;
+pub mod builder;
 pub mod release;
 pub mod refreshlog;

@@ -15,7 +15,10 @@ axum-extra = { version = "0.12.6", features = ["typed-header"] }
 config = "0.15.22"
 dotenvy = "0.15.7"
 duckdb = { version = "1.10502.0", features = ["bundled", "r2d2"] }
+flate2 = "1"
 futures-util = "0.3.32"
+sha2 = "0.10"
+ureq = "2"
 r2d2 = "0.8.10"
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -23,6 +26,6 @@ serde_json = "1.0.149"
 tokio = { version = "1.52.1", features = ["full"] }
 tokio-stream = "0.1.18"
 tower = "0.5.3"
-tower-http = { version = "0.6.8", features = ["cors", "trace", "tracing"] }
+tower-http = { version = "0.6.8", features = ["cors", "trace", "tracing", "fs"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
