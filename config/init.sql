@@ -85,7 +85,7 @@ SELECT id AS osv_id,
     unnest(aff.ranges).events AS events
 FROM (
     SELECT id, unnest(affected) AS aff 
-    FROM read_json_auto(base_path('/ALL/*.json')))
+    FROM read_json_auto(base_path('all/*.json')))   -- dir is lowercase 'all' (case-sensitive on Linux)
 WHERE aff.package.ecosystem = 'CRAN';
 
 -- 4. Updating Production Lookup
