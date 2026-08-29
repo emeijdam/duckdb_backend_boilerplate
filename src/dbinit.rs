@@ -4,6 +4,15 @@ use std::fs;
 
 use crate::settings::DatabaseSettings;
 
+/// Read a SQL script and substitute the `__CROSV_DATA_DIR__` placeholder with
+/// $CROSV_DATA_DIR (Docker sets /app/data) or the dev default. The crate's
+/// bundled DuckDB has no getenv(), so we substitute in Rust before running it.
+pub fn load_sql(path: &str) -> std::io::Result<String> {
+    let dir = std::env::var("CROSV_DATA_DIR")
+        .unwrap_or_else(|_| "~/dev/crosv_project/data".to_string());
+    Ok(fs::read_to_string(path)?.replace("__CROSV_DATA_DIR__", dir.trim_end_matches('/')))
+}
+
 pub fn db_init(config: &DatabaseSettings) -> Pool<DuckdbConnectionManager> {
     // 1. Create Manager based on the filename (e.g., "data.db" or ":memory:")
     let manager = if config.filename == ":memory:" {
@@ -22,7 +31,7 @@ pub fn db_init(config: &DatabaseSettings) -> Pool<DuckdbConnectionManager> {
     // 2. Handle the optional init_sql_path
     // If the path exists in config AND the file exists on disk, run it.
     if let Some(path) = &config.init_sql_path {
-        match fs::read_to_string(path) {
+        match load_sql(path) {
             Ok(sql) => {
                 let conn = pool.get().expect("Failed to get connection");
                 conn.execute_batch(&sql)

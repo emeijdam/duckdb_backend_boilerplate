@@ -1,7 +1,9 @@
 -- 1. Define your base path here
 -- SET extension_directory='/var/www/backend.dasc.nl/duckdb_extensions';
 
-CREATE OR REPLACE MACRO base_path(file) AS '~/dev/crosv_project/data/' || file;
+-- Data dir. `__CROSV_DATA_DIR__` is substituted by the backend at load time from
+-- $CROSV_DATA_DIR (Docker sets /app/data); it falls back to the dev default.
+CREATE OR REPLACE MACRO base_path(file) AS '__CROSV_DATA_DIR__/' || file;
 
 CREATE TABLE IF NOT EXISTS r_release_history (
     r_version VARCHAR PRIMARY KEY,

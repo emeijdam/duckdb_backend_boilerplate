@@ -16,7 +16,6 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::state::{AppState, PagedResponse, PagingInfo};
-use std::fs;
 
 #[derive(Deserialize)]
 pub struct WriteRequest {
@@ -64,7 +63,7 @@ pub async fn trigger_write(
         let conn = pool.get().map_err(|e| e.to_string())?;
 
         if let Some(update_path) = &settings.database.update_sql_path {
-            match fs::read_to_string(update_path) {
+            match crate::dbinit::load_sql(update_path) {
             Ok(sql) => {
                // let conn = pool.get().expect("Failed to get connection");
                 conn.execute_batch(&sql)
