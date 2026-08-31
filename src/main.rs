@@ -6,7 +6,9 @@ use duckdb_backend::{
     dbinit::db_init, health::health_check, 
     packages::{get_packages, get_sbom},
     lists::{create_list, get_lists, get_list, build_list_handler},
-    release::get_current_release, 
+    subscriptions::{get_subscription, put_subscription, list_subscriptions},
+    digest::{run_digest_handler, spawn_digest_loop},
+    release::get_current_release,
     refreshlog::get_refresh_log,
     routes::{get_logs, get_logs_streaming, trigger_write}, settings::get_configuration, 
     state::AppState
@@ -41,6 +43,9 @@ async fn main() {
         settings: settings.clone()
     });
 
+    // Background vulnerability-digest loop (daily/weekly emails per subscriber).
+    spawn_digest_loop(state.clone());
+
     let allowed_origins: Vec<HeaderValue> = settings.server.allowed_origins
     .iter()
     .map(|s| s.parse().expect("Invalid character in allowed_origins"))
@@ -52,9 +57,13 @@ async fn main() {
         // Allow specific origins
         .allow_origin(allowed_origins)
         // Allow specific methods
-        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
-        // Allow specific headers
-        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE])
+        // Allow specific headers (incl. the gate/SPA identity header)
+        .allow_headers([
+            header::CONTENT_TYPE,
+            header::AUTHORIZATION,
+            header::HeaderName::from_static("x-crosv-user"),
+        ])
         // Allow cookies/auth headers
         .allow_credentials(true);
 
@@ -69,6 +78,10 @@ async fn main() {
         .route("/lists", get(get_lists).post(create_list))
         .route("/lists/{name}", get(get_list))
         .route("/lists/{name}/build", post(build_list_handler))
+        // CROSV-owned email-notification settings (keyed by Kern identity).
+        .route("/subscriptions", get(get_subscription).put(put_subscription))
+        .route("/subscriptions/all", get(list_subscriptions))
+        .route("/digest/run", post(run_digest_handler))
         // Serve the built curated repos as static files: /l/<name>/…
         .nest_service(
             "/l",

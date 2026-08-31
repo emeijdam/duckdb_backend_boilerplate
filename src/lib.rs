@@ -6,5 +6,8 @@ pub mod health;
 pub mod packages;
 pub mod lists;
 pub mod builder;
+pub mod sign;
+pub mod subscriptions;
+pub mod digest;
 pub mod release;
 pub mod refreshlog;

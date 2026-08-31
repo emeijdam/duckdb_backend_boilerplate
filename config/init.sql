@@ -13,6 +13,23 @@ CREATE TABLE IF NOT EXISTS curated_lists (
     created_at TIMESTAMP DEFAULT current_timestamp
 );
 
+-- Email-notification subscriptions. App-domain settings owned by CROSV (NOT the
+-- portal): who wants a vulnerability digest, how often, and for which curated
+-- lists. Keyed by the Kern identity (email) the portal supplies. IF NOT EXISTS
+-- so it survives every refresh re-run of this script.
+CREATE TABLE IF NOT EXISTS subscriptions (
+    user_key   VARCHAR PRIMARY KEY,          -- Kern identity (email) — the owner
+    email      VARCHAR NOT NULL,             -- delivery address (defaults to user_key)
+    frequency  VARCHAR DEFAULT 'weekly',     -- 'off' | 'daily' | 'weekly'
+    lists      VARCHAR DEFAULT '[]',         -- JSON array of curated-list names; [] = all
+    created_at TIMESTAMP DEFAULT current_timestamp,
+    updated_at TIMESTAMP DEFAULT current_timestamp,
+    last_sent  TIMESTAMP,                     -- when the last digest went out
+    last_alerts VARCHAR DEFAULT '[]'          -- JSON snapshot of the last-notified advisory set (event-diff)
+);
+-- Backfill the event-diff snapshot column on databases created before it existed.
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS last_alerts VARCHAR DEFAULT '[]';
+
 CREATE TABLE IF NOT EXISTS r_release_history (
     r_version VARCHAR PRIMARY KEY,
     nickname VARCHAR,

@@ -11,11 +11,14 @@ path = "src/main.rs"
 arrow = "58.1.0"
 arrow-json = "58.1.0"
 axum = "0.8.9"
+base64 = "0.22"
+p256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
 axum-extra = { version = "0.12.6", features = ["typed-header"] }
 config = "0.15.22"
 dotenvy = "0.15.7"
 duckdb = { version = "1.10502.0", features = ["bundled", "r2d2"] }
 flate2 = "1"
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1", "tokio1-rustls-tls", "builder"] }
 futures-util = "0.3.32"
 sha2 = "0.10"
 ureq = "2"
