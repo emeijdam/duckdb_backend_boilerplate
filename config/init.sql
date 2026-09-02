@@ -247,7 +247,12 @@ SELECT
     -- served from the wasm mirror only when both axes pass.
     (
         s.osv_safety_status IN ('SAFE', 'FIXED')
-        AND l.license_verdict = 'allow'
+        -- License-clear: an explicit 'allow' verdict, OR a permissive license
+        -- (MIT/BSD/Apache/…). Permissive licenses are marked 'review' only for
+        -- the "+ file LICENSE" caveat, which is satisfied automatically — that
+        -- LICENSE file ships inside the .tgz we redistribute. So OSV-safe
+        -- permissive packages (e.g. ggplot2, the tidyverse) are mirror-eligible.
+        AND (l.license_verdict = 'allow' OR l.license_class = 'permissive')
         AND COALESCE(l.cran_restricts_use, 'no') <> 'yes'   -- honour CRAN's own flag
     ) AS mirror_eligible
 FROM safety s
