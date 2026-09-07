@@ -46,7 +46,12 @@ pub struct ServerSettings {
     pub port: u16,
     pub host: String,
     pub allowed_origins: Vec<String>,
-    pub api_token: String
+    pub api_token: String,
+    /// Kern portal origin (e.g. https://portal.dasc.nl). When set, curation
+    /// writes accept a verified portal session (fully Kern-gated) in addition
+    /// to the operator api_token. Empty = token-only (dev / no portal).
+    #[serde(default)]
+    pub portal_origin: String,
 }
 
 impl Default for ServerSettings {
@@ -60,6 +65,7 @@ impl Default for ServerSettings {
             ]
             .to_vec(),
             api_token: "mysecret".to_string(),
+            portal_origin: String::new(),
         }
     }
 }
@@ -93,6 +99,7 @@ pub fn get_configuration() -> Result<Settings, config::ConfigError> {
         .set_default("server.host", default_server.host)?
         .set_default("server.allowed_origins", default_server.allowed_origins)?
         .set_default("server.api_token", default_server.api_token)?
+        .set_default("server.portal_origin", default_server.portal_origin)?
         .set_default("database.filename", default_db.filename)?
         // Email defaults so a partially-set [email] (e.g. only SMTP_HOST via env)
         // still deserializes — every field needs a base value.

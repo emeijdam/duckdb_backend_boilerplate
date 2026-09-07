@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -51,6 +51,40 @@ fn authorized(state: &AppState, auth: Option<TypedHeader<Authorization<Bearer>>>
         .unwrap_or(false)
 }
 
+/// True when the request carries a VALID Kern portal session — verified by
+/// forwarding the caller's cookies to `<portal_origin>/api/me` (200 = a
+/// logged-in user). This is how curation becomes "Kern-gated": an interactive
+/// user must be signed in to the portal, not merely hold the operator token.
+/// Returns false (never errors) when no portal is configured or the session is
+/// absent/invalid.
+fn kern_session_ok(state: &AppState, headers: &HeaderMap) -> bool {
+    let portal = state.settings.server.portal_origin.trim_end_matches('/');
+    if portal.is_empty() {
+        return false;
+    }
+    let Some(cookie) = headers.get(header::COOKIE).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    match ureq::get(&format!("{portal}/api/me"))
+        .set("Cookie", cookie)
+        .timeout(std::time::Duration::from_secs(5))
+        .call()
+    {
+        Ok(resp) => resp.status() == 200,
+        _ => false, // 401/network/etc. → not authorized
+    }
+}
+
+/// Curation-write gate: the operator token (for server-side automation such as
+/// the hourly refresh) OR a verified Kern portal session (interactive users).
+fn write_authorized(
+    state: &AppState,
+    auth: Option<TypedHeader<Authorization<Bearer>>>,
+    headers: &HeaderMap,
+) -> bool {
+    authorized(state, auth) || kern_session_ok(state, headers)
+}
+
 /// Ready-to-paste install snippets for every consumer of the list URL.
 fn install_snippets(url: &str, pkgs: &[String]) -> serde_json::Value {
     let vec = format!(
@@ -76,11 +110,12 @@ pub struct BuildParams {
 pub async fn build_list_handler(
     State(state): State<Arc<AppState>>,
     auth: Option<TypedHeader<Authorization<Bearer>>>,
+    headers: HeaderMap,
     Path(name): Path<String>,
     axum::extract::Query(q): axum::extract::Query<BuildParams>,
 ) -> Response {
-    if !authorized(&state, auth) {
-        return (StatusCode::UNAUTHORIZED, "Provide a valid bearer token").into_response();
+    if !write_authorized(&state, auth, &headers) {
+        return (StatusCode::UNAUTHORIZED, "Sign in to the portal, or provide a valid operator token").into_response();
     }
     if !slug_ok(&name) {
         return (StatusCode::BAD_REQUEST, "invalid name").into_response();
@@ -105,10 +140,11 @@ pub async fn build_list_handler(
 pub async fn create_list(
     State(state): State<Arc<AppState>>,
     auth: Option<TypedHeader<Authorization<Bearer>>>,
+    headers: HeaderMap,
     Json(req): Json<CreateList>,
 ) -> Response {
-    if !authorized(&state, auth) {
-        return (StatusCode::UNAUTHORIZED, "Provide a valid bearer token").into_response();
+    if !write_authorized(&state, auth, &headers) {
+        return (StatusCode::UNAUTHORIZED, "Sign in to the portal, or provide a valid operator token").into_response();
     }
     if !slug_ok(&req.name) {
         return (StatusCode::BAD_REQUEST, "name must be 1–64 chars of [A-Za-z0-9_-]").into_response();
