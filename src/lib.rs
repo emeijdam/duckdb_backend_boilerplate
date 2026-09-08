@@ -4,6 +4,7 @@ pub mod routes;
 pub mod state;
 pub mod health;
 pub mod packages;
+pub mod deps;
 pub mod lists;
 pub mod builder;
 pub mod sign;

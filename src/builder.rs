@@ -22,7 +22,7 @@ use crate::state::Pool;
 const UPSTREAM: &str = "https://repo.r-wasm.org";
 
 /// base + recommended packages ship inside WebR — never mirrored, skip in closure.
-const BUNDLED: &[&str] = &[
+pub(crate) const BUNDLED: &[&str] = &[
     "base", "compiler", "datasets", "graphics", "grDevices", "grid", "methods",
     "parallel", "splines", "stats", "stats4", "tcltk", "tools", "utils", "translations",
     "KernSmooth", "MASS", "Matrix", "boot", "class", "cluster", "codetools", "foreign",

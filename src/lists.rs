@@ -40,7 +40,7 @@ fn slug_ok(s: &str) -> bool {
 
 /// Public base under which built list-repos are served. Set CROSV_MIRROR_BASE
 /// (e.g. https://crosv.dasc.nl); the repo for a list lives at <base>/l/<name>.
-fn repo_url(name: &str) -> String {
+pub(crate) fn repo_url(name: &str) -> String {
     let base = std::env::var("CROSV_MIRROR_BASE")
         .unwrap_or_else(|_| "https://crosv.dasc.nl".into());
     format!("{}/l/{}", base.trim_end_matches('/'), name)

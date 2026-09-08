@@ -30,7 +30,7 @@ pub struct PackageParams {
 /// so the ndjson + json branches never drift.
 const PACKAGE_COLUMNS: &str = "Package, Title, Description, Published, Version, License, status, \
 osv_id, osv_safety_status, license_spdx, license_class, license_verdict, requires_source, \
-has_file_license, mirror_eligible";
+has_file_license, mirror_eligible, Depends, Imports, LinkingTo, Suggests, Enhances";
 
 /// Append the license/mirror filters shared by both response branches.
 fn push_license_filters(

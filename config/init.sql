@@ -197,14 +197,22 @@ LEFT JOIN vulnerability_lookup v ON c.Package = v.Package;
 CREATE OR REPLACE VIEW packages_search AS
 WITH all_packages AS (
     -- Combine current and archived packages into a single set
-    SELECT 
+    SELECT
         Package,
         Title,
         Description,
         Published,
         Version,
         License,
-        'current' AS status 
+        -- Dependency fields straight from the CRAN DESCRIPTION index. Raw
+        -- comma lists (may contain newlines and "(>= x)" constraints; 'NA'
+        -- when absent) — parsed by the backend's /packages/{name}/deps.
+        Depends,
+        Imports,
+        LinkingTo,
+        Suggests,
+        Enhances,
+        'current' AS status
     FROM stage_cran_current
 ),
 safety AS (
@@ -215,6 +223,11 @@ SELECT
     c.Published,
     c.Version,
     c.License,
+    c.Depends,
+    c.Imports,
+    c.LinkingTo,
+    c.Suggests,
+    c.Enhances,
     c.status,
     v.osv_id,
     CASE

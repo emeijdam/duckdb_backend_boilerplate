@@ -5,6 +5,7 @@ use axum::{
 use duckdb_backend::{
     dbinit::db_init, health::health_check, 
     packages::{get_packages, get_sbom},
+    deps::get_package_deps,
     lists::{create_list, get_lists, get_list, build_list_handler},
     subscriptions::{get_subscription, put_subscription, list_subscriptions},
     digest::{run_digest_handler, spawn_digest_loop},
@@ -74,6 +75,8 @@ async fn main() {
         .route("/logstream", get(get_logs_streaming))
         .route("/release", get(get_current_release))
         .route("/packages", get(get_packages))
+        // Dependency + supply-chain view of one package (public, like /packages).
+        .route("/packages/{name}/deps", get(get_package_deps))
         .route("/sbom", get(get_sbom))
         .route("/lists", get(get_lists).post(create_list))
         .route("/lists/{name}", get(get_list))
