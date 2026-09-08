@@ -96,6 +96,10 @@ fn install_snippets(url: &str, pkgs: &[String]) -> serde_json::Value {
         "webr":         format!("webr::install({vec}, repos = \"{url}\")"),
         "r_desktop":    format!("install.packages({vec}, repos = \"{url}\")"),
         "r_options":    format!("options(repos = c(CURATED = \"{url}\"))"),
+        // Desktop R reads the source half (src/contrib) of the same URL.
+        "rstudio":      format!("RStudio ▸ Tools ▸ Global Options ▸ Packages ▸ Primary CRAN repository ▸ Custom: {url}"),
+        "rprofile_site": format!("options(repos = c(CURATED = \"{url}\"), pkgType = \"source\")  # R_HOME/etc/Rprofile.site — org-wide"),
+        "renv_lock":    format!("\"Repositories\": [ {{ \"Name\": \"CURATED\", \"URL\": \"{url}\" }} ]"),
     })
 }
 

@@ -6,12 +6,20 @@
 //! mirror-eligible. Runs inside the backend with direct DB access; triggered by
 //! `POST /lists/{name}/build`.
 //!
-//! (Phase 2 — source `src/contrib` for desktop R, and compiling packages r-wasm
-//! hasn't built via the rwasm/Docker toolchain — attaches here as further steps.)
+//! Phase 2a (done): the same list is ALSO materialized as a classic CRAN
+//! source repository under `src/contrib/` — the CRAN-current tarball of every
+//! closure member, fetched from CRAN, verified against the MD5 CRAN publishes
+//! in its own index (so a tampered download can never be shipped), and indexed
+//! by a filtered `PACKAGES`. That is what desktop R / RStudio / renv / CI read:
+//! `install.packages(x, repos = "<base>/l/<list>")` just works. Both artifacts
+//! of a package (WASM + source) are bound by SHA-256 in the one SBOM.
+//!
+//! (Still open: prebuilt macOS/Windows binaries under `bin/<os>/…`, and compiling
+//! packages r-wasm hasn't built via the rwasm/Docker toolchain.)
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use duckdb::params;
 use serde::Serialize;
@@ -21,6 +29,18 @@ use crate::state::Pool;
 
 const UPSTREAM: &str = "https://repo.r-wasm.org";
 
+/// CRAN mirror the source tarballs are fetched from. Override with
+/// `CROSV_CRAN_UPSTREAM` (e.g. an internal mirror) — every download is still
+/// MD5-verified against the CRAN index we ingested, so the mirror is untrusted.
+fn cran_upstream() -> String {
+    std::env::var("CROSV_CRAN_UPSTREAM")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "https://cloud.r-project.org".to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
 /// base + recommended packages ship inside WebR — never mirrored, skip in closure.
 pub(crate) const BUNDLED: &[&str] = &[
     "base", "compiler", "datasets", "graphics", "grDevices", "grid", "methods",
@@ -29,12 +49,24 @@ pub(crate) const BUNDLED: &[&str] = &[
     "lattice", "mgcv", "nlme", "nnet", "rpart", "spatial", "survival",
 ];
 
+/// One shipped package. A component may carry a WASM artifact (WebR), a source
+/// tarball (desktop R), or both; each is bound by its own SHA-256. `version` is
+/// the WASM build's version when there is one, else the source version.
 #[derive(Serialize)]
 pub struct Component {
     pub name: String,
     pub version: String,
-    pub wasm_sha256: String,
-    pub bytes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wasm_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<usize>,
+    /// CRAN-current version served under `src/contrib/` (the vetted row).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src_bytes: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -42,8 +74,12 @@ pub struct BuildReport {
     pub name: String,
     pub r_version: String,
     pub roots: Vec<String>,
+    /// Packages with a WASM artifact (WebR / Sparrow R Studio).
     pub shipped: usize,
     pub blocked: HashMap<String, String>,
+    /// Packages with a source tarball under `src/contrib/` (desktop R).
+    pub src_shipped: usize,
+    pub src_blocked: HashMap<String, String>,
     pub out_dir: String,
     pub components: Vec<Component>,
     /// The CRA compliance proof: a CycloneDX SBOM written next to the repo,
@@ -285,8 +321,25 @@ fn build_sbom(
             let mut properties = vec![
                 serde_json::json!({ "name": "crosv:osv_status", "value": m.map(|m| m.osv_status.clone()).unwrap_or_default() }),
                 serde_json::json!({ "name": "crosv:license_verdict", "value": m.map(|m| m.verdict.clone()).unwrap_or_default() }),
-                serde_json::json!({ "name": "crosv:artifact_bytes", "value": c.bytes.to_string() }),
             ];
+            // One component may bind two artifacts. `hashes` carries both; the
+            // per-artifact properties say which hash is which, and the
+            // `src_file` is the path a verifier fetches to recompute it.
+            let mut hashes = Vec::new();
+            if let (Some(sha), Some(bytes)) = (&c.wasm_sha256, c.bytes) {
+                hashes.push(serde_json::json!({ "alg": "SHA-256", "content": sha }));
+                properties.push(serde_json::json!({ "name": "crosv:wasm_sha256", "value": sha }));
+                properties.push(serde_json::json!({ "name": "crosv:artifact_bytes", "value": bytes.to_string() }));
+            }
+            if let (Some(sha), Some(bytes), Some(ver)) = (&c.src_sha256, c.src_bytes, &c.src_version) {
+                hashes.push(serde_json::json!({ "alg": "SHA-256", "content": sha }));
+                properties.push(serde_json::json!({ "name": "crosv:src_sha256", "value": sha }));
+                properties.push(serde_json::json!({ "name": "crosv:src_bytes", "value": bytes.to_string() }));
+                properties.push(serde_json::json!({ "name": "crosv:src_file", "value": format!("src/contrib/{}_{ver}.tar.gz", c.name) }));
+                if ver != &c.version {
+                    properties.push(serde_json::json!({ "name": "crosv:src_version", "value": ver }));
+                }
+            }
             if let Some(osv_id) = m.map(|m| m.osv_id.as_str()).filter(|s| !s.is_empty()) {
                 properties.push(serde_json::json!({ "name": "crosv:osv_id", "value": osv_id }));
             }
@@ -299,7 +352,7 @@ fn build_sbom(
                 "version": c.version,
                 "purl": format!("pkg:cran/{}@{}", c.name, c.version),
                 "licenses": licenses,
-                "hashes": [ { "alg": "SHA-256", "content": c.wasm_sha256 } ],
+                "hashes": hashes,
                 "properties": properties,
             })
         })
@@ -307,7 +360,15 @@ fn build_sbom(
 
     let seed = format!(
         "{list_name}|{generated}|{}",
-        components.iter().map(|c| c.wasm_sha256.as_str()).collect::<Vec<_>>().join(",")
+        components
+            .iter()
+            .map(|c| format!(
+                "{}:{}",
+                c.wasm_sha256.as_deref().unwrap_or(""),
+                c.src_sha256.as_deref().unwrap_or("")
+            ))
+            .collect::<Vec<_>>()
+            .join(",")
     );
 
     serde_json::json!({
@@ -337,6 +398,233 @@ fn build_sbom(
         // known OSV vulnerability. This array IS the compliance assertion.
         "vulnerabilities": []
     })
+}
+
+/// Package names in a DESCRIPTION dependency field (`Depends`/`Imports`/…):
+/// strip version constraints, drop the `R (>= x)` pseudo-dependency.
+fn dep_names(field: &str) -> impl Iterator<Item = String> + '_ {
+    field.split(',').filter_map(|part| {
+        let d = part.split('(').next().unwrap_or("").trim();
+        (!d.is_empty() && d != "R").then(|| d.to_string())
+    })
+}
+
+/// One CRAN-current package as the ingested CRAN index describes it.
+struct SrcRecord {
+    version: String,
+    /// MD5 CRAN publishes for the tarball — what every download is checked against.
+    md5: String,
+    deps: HashSet<String>,
+    /// The `PACKAGES` DCF block for this package (fields R's
+    /// `available.packages()` reads), rebuilt from the index columns.
+    dcf: String,
+}
+
+/// The DCF fields `available.packages()` consumes, in CRAN's order.
+const DCF_FIELDS: [&str; 15] = [
+    "Package", "Version", "Priority", "Depends", "Imports", "LinkingTo", "Suggests",
+    "Enhances", "License", "License_is_FOSS", "License_restricts_use", "OS_type", "Archs",
+    "MD5sum", "NeedsCompilation",
+];
+
+/// Load the whole CRAN-current index (~20k rows, a few MB) from
+/// `stage_cran_current`: the closure needs everyone's dependencies.
+fn cran_index(pool: &Pool) -> Result<HashMap<String, SrcRecord>, String> {
+    let conn = pool.get().map_err(|e| e.to_string())?;
+    // CAST: read_csv auto-detects types per column; we want text for all.
+    let cols = DCF_FIELDS
+        .iter()
+        .map(|f| format!("CAST(\"{f}\" AS VARCHAR)"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut stmt = conn
+        .prepare(&format!("SELECT {cols} FROM stage_cran_current"))
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            let mut vals: Vec<Option<String>> = Vec::with_capacity(DCF_FIELDS.len());
+            for i in 0..DCF_FIELDS.len() {
+                vals.push(r.get::<_, Option<String>>(i)?);
+            }
+            Ok(vals)
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut out = HashMap::new();
+    for row in rows {
+        let vals = row.map_err(|e| e.to_string())?;
+        // Present = non-empty and not the literal NA the CSV export writes.
+        // read_csv auto-types the yes/no columns as BOOLEAN, so the CAST
+        // yields "true"/"false" — R's index wants CRAN's literal "yes"/"no".
+        let present = |i: usize| -> Option<String> {
+            vals[i]
+                .as_deref()
+                .map(|v| v.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|v| !v.is_empty() && v != "NA")
+                .map(|v| match (DCF_FIELDS[i], v.as_str()) {
+                    ("NeedsCompilation" | "License_is_FOSS" | "License_restricts_use", "true") => "yes".to_string(),
+                    ("NeedsCompilation" | "License_is_FOSS" | "License_restricts_use", "false") => "no".to_string(),
+                    _ => v,
+                })
+        };
+        let (Some(name), Some(version), Some(md5)) = (present(0), present(1), present(13)) else {
+            continue;
+        };
+        let mut deps = HashSet::new();
+        for i in [3usize, 4, 5] {
+            if let Some(v) = present(i) {
+                deps.extend(dep_names(&v));
+            }
+        }
+        let dcf = DCF_FIELDS
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| present(i).map(|v| format!("{f}: {v}")))
+            .collect::<Vec<_>>()
+            .join("\n");
+        out.insert(name, SrcRecord { version, md5: md5.to_lowercase(), deps, dcf });
+    }
+    Ok(out)
+}
+
+/// Dependency closure over the CRAN index (Depends+Imports+LinkingTo), skipping
+/// what ships with R.
+fn src_closure(roots: &[String], index: &HashMap<String, SrcRecord>) -> HashSet<String> {
+    let bundled: HashSet<&str> = BUNDLED.iter().copied().collect();
+    let mut seen = HashSet::new();
+    let mut stack: Vec<String> = roots.to_vec();
+    while let Some(p) = stack.pop() {
+        if seen.contains(&p) || bundled.contains(p.as_str()) {
+            continue;
+        }
+        seen.insert(p.clone());
+        if let Some(rec) = index.get(&p) {
+            stack.extend(rec.deps.iter().filter(|d| !seen.contains(*d)).cloned());
+        }
+    }
+    seen
+}
+
+fn md5_hex(bytes: &[u8]) -> String {
+    format!("{:x}", md5::Md5::digest(bytes))
+}
+
+/// A source tarball as shipped: verified bytes + hashes.
+struct SrcArtifact {
+    version: String,
+    sha256: String,
+    bytes: usize,
+}
+
+/// Get `<pkg>_<ver>.tar.gz` with the MD5 CRAN's index promises. Reuses the
+/// file already on disk when it still matches (hourly rebuilds don't re-pull
+/// CRAN), else fetches `src/contrib/` and falls back to `src/contrib/Archive/`
+/// (the index can lag a CRAN release by an hour). Never returns unverified bytes.
+fn fetch_source(pkg: &str, rec: &SrcRecord, dest: &Path) -> Result<Vec<u8>, String> {
+    if let Ok(existing) = std::fs::read(dest) {
+        if md5_hex(&existing) == rec.md5 {
+            return Ok(existing);
+        }
+    }
+    let file = format!("{pkg}_{}.tar.gz", rec.version);
+    let cran = cran_upstream();
+    let urls = [
+        format!("{cran}/src/contrib/{file}"),
+        format!("{cran}/src/contrib/Archive/{pkg}/{file}"),
+    ];
+    let mut last_err = String::new();
+    for url in &urls {
+        match http_get(url) {
+            Ok(blob) => {
+                let got = md5_hex(&blob);
+                if got == rec.md5 {
+                    return Ok(blob);
+                }
+                last_err = format!("MD5 mismatch for {url}: CRAN index {} vs downloaded {got}", rec.md5);
+            }
+            Err(e) => last_err = e,
+        }
+    }
+    Err(last_err)
+}
+
+/// Materialize the source half of a list under `<out_dir>/src/contrib/`.
+/// Returns the shipped artifacts (by name) and the blocked map with reasons.
+fn build_source_repo(
+    pool: &Pool,
+    roots: &[String],
+    allow: &HashSet<String>,
+    out_dir: &Path,
+) -> Result<(HashMap<String, SrcArtifact>, HashMap<String, String>), String> {
+    let index = cran_index(pool)?;
+    let want = src_closure(roots, &index);
+
+    let mut blocked: HashMap<String, String> = HashMap::new();
+    for pkg in &want {
+        if !index.contains_key(pkg) {
+            blocked.insert(pkg.clone(), "not on CRAN (current index)".into());
+        } else if !allow.contains(pkg) {
+            blocked.insert(pkg.clone(), "NOT mirror-eligible (CVE/license gate)".into());
+        }
+    }
+    let mut ship: Vec<String> = want.iter().filter(|p| !blocked.contains_key(*p)).cloned().collect();
+    ship.sort();
+
+    let contrib_dir = out_dir.join("src").join("contrib");
+    std::fs::create_dir_all(&contrib_dir).map_err(|e| e.to_string())?;
+
+    let mut artifacts = HashMap::new();
+    let mut kept_dcf = Vec::new();
+    for pkg in &ship {
+        let rec = &index[pkg];
+        let file = format!("{pkg}_{}.tar.gz", rec.version);
+        let dest = contrib_dir.join(&file);
+        match fetch_source(pkg, rec, &dest) {
+            Ok(blob) => {
+                std::fs::write(&dest, &blob).map_err(|e| e.to_string())?;
+                kept_dcf.push(rec.dcf.clone());
+                artifacts.insert(
+                    pkg.clone(),
+                    SrcArtifact {
+                        version: rec.version.clone(),
+                        sha256: format!("{:x}", Sha256::digest(&blob)),
+                        bytes: blob.len(),
+                    },
+                );
+            }
+            // A package we can't verify is a package we don't ship — and we
+            // say why, rather than failing the whole build.
+            Err(e) => {
+                let _ = std::fs::remove_file(&dest);
+                blocked.insert(pkg.clone(), format!("source fetch failed: {e}"));
+            }
+        }
+    }
+
+    // Filtered PACKAGES + PACKAGES.gz — R reads .gz first, falls back to plain.
+    let packages = format!("{}\n", kept_dcf.join("\n\n"));
+    std::fs::write(contrib_dir.join("PACKAGES"), &packages).map_err(|e| e.to_string())?;
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(packages.as_bytes()).map_err(|e| e.to_string())?;
+    std::fs::write(contrib_dir.join("PACKAGES.gz"), gz.finish().map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+
+    // Drop tarballs of packages no longer in the list (a removed root, or a
+    // package that just lost eligibility) so the served repo equals the bill.
+    let keep: HashSet<String> = artifacts
+        .iter()
+        .map(|(p, a)| format!("{p}_{}.tar.gz", a.version))
+        .collect();
+    if let Ok(entries) = std::fs::read_dir(&contrib_dir) {
+        for e in entries.flatten() {
+            let n = e.file_name().to_string_lossy().to_string();
+            if n.ends_with(".tar.gz") && !keep.contains(&n) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+
+    Ok((artifacts, blocked))
 }
 
 /// Build the WebR repo for `name` under `<out_root>/l/<name>/`.
@@ -382,8 +670,11 @@ pub fn build_list(
         components.push(Component {
             name: pkg.clone(),
             version: rec.version.clone(),
-            wasm_sha256: sha,
-            bytes: blob.len(),
+            wasm_sha256: Some(sha),
+            bytes: Some(blob.len()),
+            src_version: None,
+            src_sha256: None,
+            src_bytes: None,
         });
     }
 
@@ -395,10 +686,39 @@ pub fn build_list(
     std::fs::write(contrib_dir.join("PACKAGES.gz"), gz.finish().map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
 
+    // Phase 2a: the same list as a CRAN source repo (desktop R / RStudio /
+    // renv). Its closure comes from CRAN's own dependency data, so it can ship
+    // packages r-wasm never built — and vice versa; the two sets are merged
+    // per package into one component list, one SBOM.
+    let (src_artifacts, src_blocked) = build_source_repo(pool, &roots, &allow, &out_dir)?;
+    let mut src_names: Vec<&String> = src_artifacts.keys().collect();
+    src_names.sort();
+    for pkg in src_names {
+        let a = &src_artifacts[pkg];
+        if let Some(c) = components.iter_mut().find(|c| &c.name == pkg) {
+            c.src_version = Some(a.version.clone());
+            c.src_sha256 = Some(a.sha256.clone());
+            c.src_bytes = Some(a.bytes);
+        } else {
+            components.push(Component {
+                name: pkg.clone(),
+                version: a.version.clone(),
+                wasm_sha256: None,
+                bytes: None,
+                src_version: Some(a.version.clone()),
+                src_sha256: Some(a.sha256.clone()),
+                src_bytes: Some(a.bytes),
+            });
+        }
+    }
+    components.sort_by(|a, b| a.name.cmp(&b.name));
+    let src_shipped = src_artifacts.len();
+
     // CRA compliance proof: emit a CycloneDX SBOM for the vetted set, pinned by
     // its own SHA-256 so the manifest attests to an exact bill of materials.
     let generated = now_iso(pool);
-    let meta = sbom_meta(pool, &ship)?;
+    let all_names: Vec<String> = components.iter().map(|c| c.name.clone()).collect();
+    let meta = sbom_meta(pool, &all_names)?;
     let sbom = build_sbom(name, rver, &components, &meta, &generated);
     let sbom_bytes = serde_json::to_vec_pretty(&sbom).map_err(|e| e.to_string())?;
     let sbom_sha = format!("{:x}", Sha256::digest(&sbom_bytes));
@@ -427,6 +747,8 @@ pub fn build_list(
         roots,
         shipped: ship.len(),
         blocked,
+        src_shipped,
+        src_blocked,
         out_dir: out_dir.to_string_lossy().to_string(),
         sbom: Some(SbomRef {
             file: "sbom.cdx.json".to_string(),
@@ -445,4 +767,40 @@ pub fn build_list(
     .map_err(|e| e.to_string())?;
 
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dep_names_strips_constraints_and_r() {
+        let v: Vec<String> =
+            dep_names("R (>= 4.1), cli, gtable (>= 0.3.6), lifecycle (> 1.0.1)").collect();
+        assert_eq!(v, ["cli", "gtable", "lifecycle"]);
+    }
+
+    #[test]
+    fn src_closure_follows_index_and_skips_bundled() {
+        let mut index = HashMap::new();
+        let rec = |deps: &[&str]| SrcRecord {
+            version: "1".into(),
+            md5: String::new(),
+            deps: deps.iter().map(|s| s.to_string()).collect(),
+            dcf: String::new(),
+        };
+        index.insert("a".to_string(), rec(&["b", "stats"]));
+        index.insert("b".to_string(), rec(&["c"]));
+        index.insert("c".to_string(), rec(&[]));
+        let got = src_closure(&["a".to_string()], &index);
+        let mut v: Vec<&String> = got.iter().collect();
+        v.sort();
+        assert_eq!(v, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn md5_matches_cran_convention() {
+        // Lowercase hex, 32 chars — what packages.csv's MD5sum column carries.
+        assert_eq!(md5_hex(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
+    }
 }

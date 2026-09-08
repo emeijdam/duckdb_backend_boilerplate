@@ -100,8 +100,13 @@ struct Shipped {
     list: String,
     url: String,
     version: String,
-    wasm_sha256: String,
-    bytes: u64,
+    /// WebR artifact (Sparrow R Studio) — absent when r-wasm hasn't built it.
+    wasm_sha256: Option<String>,
+    bytes: Option<u64>,
+    /// CRAN source tarball under `src/contrib/` (desktop R / RStudio / renv).
+    src_version: Option<String>,
+    src_sha256: Option<String>,
+    src_bytes: Option<u64>,
     purl: String,
     sbom_url: String,
     sbom_sha256: Option<String>,
@@ -151,8 +156,11 @@ fn scan_manifests(pkg: &str) -> (Vec<Shipped>, Vec<BlockedIn>) {
                 list: list.clone(),
                 url,
                 version,
-                wasm_sha256: c["wasm_sha256"].as_str().unwrap_or_default().to_string(),
-                bytes: c["bytes"].as_u64().unwrap_or(0),
+                wasm_sha256: c["wasm_sha256"].as_str().map(String::from),
+                bytes: c["bytes"].as_u64(),
+                src_version: c["src_version"].as_str().map(String::from),
+                src_sha256: c["src_sha256"].as_str().map(String::from),
+                src_bytes: c["src_bytes"].as_u64(),
             });
         } else if let Some(reason) = m["blocked"][pkg].as_str() {
             blocked.push(BlockedIn { list, reason: reason.to_string() });
