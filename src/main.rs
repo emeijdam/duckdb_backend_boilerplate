@@ -6,6 +6,7 @@ use duckdb_backend::{
     dbinit::db_init, health::health_check, 
     packages::{get_packages, get_sbom},
     deps::get_package_deps,
+    openapi::openapi,
     lists::{create_list, get_lists, get_list, build_list_handler},
     subscriptions::{get_subscription, put_subscription, list_subscriptions},
     digest::{run_digest_handler, spawn_digest_loop},
@@ -77,6 +78,8 @@ async fn main() {
         .route("/packages", get(get_packages))
         // Dependency + supply-chain view of one package (public, like /packages).
         .route("/packages/{name}/deps", get(get_package_deps))
+        // Machine-readable contract for all of the above (rendered by the /api page).
+        .route("/openapi.json", get(openapi))
         .route("/sbom", get(get_sbom))
         .route("/lists", get(get_lists).post(create_list))
         .route("/lists/{name}", get(get_list))
