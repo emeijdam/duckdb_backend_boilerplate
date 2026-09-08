@@ -80,6 +80,9 @@ pub struct BuildReport {
     /// Packages with a source tarball under `src/contrib/` (desktop R).
     pub src_shipped: usize,
     pub src_blocked: HashMap<String, String>,
+    /// Prebuilt CRAN binaries, one entry per mirrored `bin/<platform>/contrib/<R>`
+    /// target (RStudio on macOS/Windows installs these without a compiler).
+    pub binaries: Vec<BinTarget>,
     pub out_dir: String,
     pub components: Vec<Component>,
     /// The CRA compliance proof: a CycloneDX SBOM written next to the repo,
@@ -132,6 +135,10 @@ struct Record {
     version: String,
     deps: HashSet<String>,
     raw: String,
+    /// Integrity fields CRAN's own index publishes for the artifact (the
+    /// binary indexes carry MD5sum and, on macOS, SHA256sum; r-wasm's none).
+    md5: Option<String>,
+    sha256: Option<String>,
 }
 
 fn http_get(url: &str) -> Result<Vec<u8>, String> {
@@ -146,6 +153,8 @@ fn http_get(url: &str) -> Result<Vec<u8>, String> {
 /// Parse a CRAN/WebR PACKAGES (DCF) into name → record, keeping the raw block.
 fn parse_packages(text: &str) -> HashMap<String, Record> {
     let mut out = HashMap::new();
+    // CRAN's Windows index is CRLF; normalise so block/line splitting holds.
+    let text = text.replace("\r\n", "\n");
     for block in text.split("\n\n") {
         let block = block.trim_matches('\n');
         if block.is_empty() {
@@ -182,7 +191,9 @@ fn parse_packages(text: &str) -> HashMap<String, Record> {
             }
         }
         if !name.is_empty() {
-            out.insert(name.clone(), Record { version, deps, raw: block.to_string() });
+            let md5 = fields.get("MD5sum").map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty());
+            let sha256 = fields.get("SHA256sum").map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty());
+            out.insert(name.clone(), Record { version, deps, raw: block.to_string(), md5, sha256 });
         }
     }
     out
@@ -307,6 +318,7 @@ fn build_sbom(
     list_name: &str,
     rver: &str,
     components: &[Component],
+    binaries: &[BinTarget],
     meta: &HashMap<String, PkgMeta>,
     generated: &str,
 ) -> serde_json::Value {
@@ -314,6 +326,11 @@ fn build_sbom(
         .iter()
         .map(|c| {
             let m = meta.get(&c.name);
+            // Prebuilt binaries of this package, one per mirrored target.
+            let bins: Vec<(&str, &BinArtifact)> = binaries
+                .iter()
+                .filter_map(|t| t.components.iter().find(|b| b.name == c.name).map(|b| (t.target.as_str(), b)))
+                .collect();
             let mut licenses = Vec::new();
             if let Some(spdx) = m.map(|m| m.spdx.as_str()).filter(|s| !s.is_empty()) {
                 licenses.push(serde_json::json!({ "license": { "id": spdx } }));
@@ -338,6 +355,14 @@ fn build_sbom(
                 properties.push(serde_json::json!({ "name": "crosv:src_file", "value": format!("src/contrib/{}_{ver}.tar.gz", c.name) }));
                 if ver != &c.version {
                     properties.push(serde_json::json!({ "name": "crosv:src_version", "value": ver }));
+                }
+            }
+            for (target, b) in &bins {
+                hashes.push(serde_json::json!({ "alg": "SHA-256", "content": b.sha256 }));
+                properties.push(serde_json::json!({ "name": format!("crosv:bin_sha256[{target}]"), "value": b.sha256 }));
+                properties.push(serde_json::json!({ "name": format!("crosv:bin_file[{target}]"), "value": b.file }));
+                if !b.index_verified {
+                    properties.push(serde_json::json!({ "name": format!("crosv:bin_index_verified[{target}]"), "value": "false" }));
                 }
             }
             if let Some(osv_id) = m.map(|m| m.osv_id.as_str()).filter(|s| !s.is_empty()) {
@@ -627,6 +652,158 @@ fn build_source_repo(
     Ok((artifacts, blocked))
 }
 
+/// One prebuilt binary as shipped for a target.
+#[derive(Serialize, Clone)]
+pub struct BinArtifact {
+    pub name: String,
+    pub version: String,
+    pub file: String,
+    pub sha256: String,
+    pub bytes: usize,
+    /// True when the download matched the checksum CRAN's index publishes
+    /// (MD5sum, or SHA256sum where present). False = CRAN's index for this
+    /// target carries no checksum; we still pin OUR sha256 in the SBOM.
+    pub index_verified: bool,
+}
+
+/// The mirrored slice of one CRAN binary index, e.g. `windows/contrib/4.6`.
+#[derive(Serialize)]
+pub struct BinTarget {
+    /// Path under `bin/`, exactly as R's `contrib.url(type = "binary")` builds it.
+    pub target: String,
+    pub shipped: usize,
+    /// Packages in the list that CRAN has no binary for on this target — R
+    /// falls back to the source tarball for these (needs a compiler).
+    pub missing: Vec<String>,
+    pub components: Vec<BinArtifact>,
+}
+
+/// The CRAN binary targets to mirror. Override with `CROSV_BIN_TARGETS`
+/// (comma-separated `bin/`-relative paths). Defaults cover current R on the
+/// three desktop platforms; CRAN's macOS directory name tracks the build OS
+/// (big-sur-* for R ≤ 4.5, sonoma-arm64 for R 4.6 on Apple silicon).
+fn bin_targets() -> Vec<String> {
+    std::env::var("CROSV_BIN_TARGETS")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.split(',').map(|t| t.trim().trim_matches('/').to_string()).filter(|t| !t.is_empty()).collect())
+        .unwrap_or_else(|| {
+            [
+                "windows/contrib/4.5",
+                "windows/contrib/4.6",
+                "macosx/big-sur-arm64/contrib/4.5",
+                "macosx/sonoma-arm64/contrib/4.6",
+                "macosx/big-sur-x86_64/contrib/4.5",
+                "macosx/big-sur-x86_64/contrib/4.6",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+        })
+}
+
+/// Mirror the curated set from every CRAN binary target under
+/// `<out_dir>/bin/<target>/`. A target whose index can't be fetched is
+/// reported (shipped 0, everything missing) rather than failing the build;
+/// per package, a checksum mismatch means "missing", never "shipped".
+fn build_binary_repos(ship: &[String], out_dir: &Path) -> Vec<BinTarget> {
+    let cran = cran_upstream();
+    let mut out = Vec::new();
+    for target in bin_targets() {
+        let ext = if target.starts_with("windows") { "zip" } else { "tgz" };
+        let dir = out_dir.join("bin").join(&target);
+        let index = match http_get(&format!("{cran}/bin/{target}/PACKAGES")) {
+            Ok(b) => parse_packages(&String::from_utf8_lossy(&b)),
+            Err(e) => {
+                tracing::warn!("bin target {target}: index unavailable: {e}");
+                out.push(BinTarget { target, shipped: 0, missing: ship.to_vec(), components: vec![] });
+                continue;
+            }
+        };
+        if std::fs::create_dir_all(&dir).is_err() {
+            out.push(BinTarget { target, shipped: 0, missing: ship.to_vec(), components: vec![] });
+            continue;
+        }
+
+        let mut components = Vec::new();
+        let mut missing = Vec::new();
+        let mut kept_raw = Vec::new();
+        for pkg in ship {
+            let Some(rec) = index.get(pkg) else {
+                missing.push(pkg.clone());
+                continue;
+            };
+            let file = format!("{pkg}_{}.{ext}", rec.version);
+            let dest = dir.join(&file);
+            // Reuse a matching file on disk (hourly rebuilds), else fetch.
+            let checks_out = |blob: &[u8]| -> Option<bool> {
+                if let Some(sha) = &rec.sha256 {
+                    return Some(&format!("{:x}", Sha256::digest(blob)) == sha);
+                }
+                rec.md5.as_ref().map(|m| &md5_hex(blob) == m)
+            };
+            let blob = match std::fs::read(&dest) {
+                Ok(b) if checks_out(&b) != Some(false) => Some(b),
+                _ => match http_get(&format!("{cran}/bin/{target}/{file}")) {
+                    Ok(b) => Some(b),
+                    Err(e) => {
+                        tracing::warn!("bin {target}/{file}: {e}");
+                        None
+                    }
+                },
+            };
+            let Some(blob) = blob else {
+                missing.push(pkg.clone());
+                continue;
+            };
+            let verified = checks_out(&blob);
+            if verified == Some(false) {
+                tracing::warn!("bin {target}/{file}: checksum mismatch vs CRAN index — not shipped");
+                let _ = std::fs::remove_file(&dest);
+                missing.push(pkg.clone());
+                continue;
+            }
+            if std::fs::write(&dest, &blob).is_err() {
+                missing.push(pkg.clone());
+                continue;
+            }
+            kept_raw.push(rec.raw.clone());
+            components.push(BinArtifact {
+                name: pkg.clone(),
+                version: rec.version.clone(),
+                file: format!("bin/{target}/{file}"),
+                sha256: format!("{:x}", Sha256::digest(&blob)),
+                bytes: blob.len(),
+                index_verified: verified.unwrap_or(false),
+            });
+        }
+
+        // Filtered PACKAGES(.gz) for this target — the raw CRAN blocks, so
+        // Built/Archs fields R uses for binary selection are preserved.
+        let packages = format!("{}\n", kept_raw.join("\n\n"));
+        let _ = std::fs::write(dir.join("PACKAGES"), &packages);
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        if gz.write_all(packages.as_bytes()).is_ok() {
+            if let Ok(bytes) = gz.finish() {
+                let _ = std::fs::write(dir.join("PACKAGES.gz"), bytes);
+            }
+        }
+        // Prune binaries that left the list.
+        let keep: HashSet<String> = components.iter().map(|c| c.file.rsplit('/').next().unwrap_or("").to_string()).collect();
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for e in entries.flatten() {
+                let n = e.file_name().to_string_lossy().to_string();
+                if (n.ends_with(".zip") || n.ends_with(".tgz")) && !keep.contains(&n) {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+        missing.sort();
+        out.push(BinTarget { target, shipped: components.len(), missing, components });
+    }
+    out
+}
+
 /// Build the WebR repo for `name` under `<out_root>/l/<name>/`.
 pub fn build_list(
     pool: &Pool,
@@ -718,8 +895,13 @@ pub fn build_list(
     // its own SHA-256 so the manifest attests to an exact bill of materials.
     let generated = now_iso(pool);
     let all_names: Vec<String> = components.iter().map(|c| c.name.clone()).collect();
+
+    // Phase 2b: prebuilt CRAN binaries for desktop R on macOS/Windows, for
+    // every package that made it into the list (either artifact above).
+    let binaries = build_binary_repos(&all_names, &out_dir);
+
     let meta = sbom_meta(pool, &all_names)?;
-    let sbom = build_sbom(name, rver, &components, &meta, &generated);
+    let sbom = build_sbom(name, rver, &components, &binaries, &meta, &generated);
     let sbom_bytes = serde_json::to_vec_pretty(&sbom).map_err(|e| e.to_string())?;
     let sbom_sha = format!("{:x}", Sha256::digest(&sbom_bytes));
     std::fs::write(out_dir.join("sbom.cdx.json"), &sbom_bytes).map_err(|e| e.to_string())?;
@@ -749,6 +931,7 @@ pub fn build_list(
         blocked,
         src_shipped,
         src_blocked,
+        binaries,
         out_dir: out_dir.to_string_lossy().to_string(),
         sbom: Some(SbomRef {
             file: "sbom.cdx.json".to_string(),

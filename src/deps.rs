@@ -107,6 +107,9 @@ struct Shipped {
     src_version: Option<String>,
     src_sha256: Option<String>,
     src_bytes: Option<u64>,
+    /// CRAN binary targets (`windows/contrib/4.6`, `macosx/sonoma-arm64/contrib/4.6`, …)
+    /// this package ships prebuilt for — RStudio installs those without a compiler.
+    binaries: Vec<String>,
     purl: String,
     sbom_url: String,
     sbom_sha256: Option<String>,
@@ -161,6 +164,20 @@ fn scan_manifests(pkg: &str) -> (Vec<Shipped>, Vec<BlockedIn>) {
                 src_version: c["src_version"].as_str().map(String::from),
                 src_sha256: c["src_sha256"].as_str().map(String::from),
                 src_bytes: c["src_bytes"].as_u64(),
+                binaries: m["binaries"]
+                    .as_array()
+                    .map(|ts| {
+                        ts.iter()
+                            .filter(|t| {
+                                t["components"]
+                                    .as_array()
+                                    .map(|cs| cs.iter().any(|b| b["name"].as_str() == Some(pkg)))
+                                    .unwrap_or(false)
+                            })
+                            .filter_map(|t| t["target"].as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             });
         } else if let Some(reason) = m["blocked"][pkg].as_str() {
             blocked.push(BlockedIn { list, reason: reason.to_string() });
